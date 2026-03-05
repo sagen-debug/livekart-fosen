@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="no">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Livekart – kollektivtrafikken på Fosen</title>
+
+    <!-- Leaflet lokalt (ikke CDN) -->
+    <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar" id="topbar">
+      <div class="topbar__inner">
+        <div>
+          <h1>Livekart – kollektivtrafikken på Fosen</h1>
+          <p class="muted">Busser og hurtigbåter (AtB via Entur). Oppdateres hvert 10. sekund.</p>
+        </div>
+
+        <div class="status" id="status">
+          <div class="status__row">
+            <span class="dot" id="dot"></span>
+            <span id="statusText">Starter…</span>
+          </div>
+          <div class="status__row muted small">
+            <span id="metaText">—</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+      <div id="map" class="map" aria-label="Kart"></div>
+
+      <div class="infobox" id="infobox">
+        <div>
+          Kartet viser busser og hurtigbåter i Fosen-kommunene, og om de er i rute eller forsinket.
+          <strong>0 = i rute</strong>, og <strong>+ = forsinket</strong>. Kartet oppdateres hvert tiende sekund.
+        </div>
+        <div class="muted italic">Kilde: AtB (via Entur)</div>
+      </div>
+    </main>
+
+    <script src="/vendor/leaflet/leaflet.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

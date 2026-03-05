@@ -1,0 +1,122 @@
+:root {
+  --bg: #0b0f14;
+  --card: #121826;
+  --text: #e6edf3;
+  --muted: #9aa4b2;
+  --border: rgba(255, 255, 255, 0.10);
+
+  --good: #35c46a;
+  --warn: #f0b429;
+  --bad: #ff5c5c;
+
+  --marker-bg: #ffffff;
+  --marker-border: #111111;
+  --marker-text: #111111;
+
+  --boat-bg: #1e6fff;
+  --boat-text: #ffffff;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.topbar {
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 14px;
+}
+
+.topbar__inner {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+h1 { margin: 0 0 4px 0; font-size: 18px; line-height: 1.2; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.italic { font-style: italic; }
+
+.status { min-width: 260px; text-align: right; }
+.status__row { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 99px;
+  background: var(--warn);
+  display: inline-block;
+}
+
+.main { position: relative; height: calc(100% - 74px); }
+body.embed .topbar { display: none; }
+body.embed .main { height: 100%; }
+
+.map { height: 100%; width: 100%; }
+
+/* Infoboks nederst til venstre */
+.infobox {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  max-width: 520px;
+  background: rgba(18, 24, 38, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.35;
+  backdrop-filter: blur(6px);
+}
+
+/* Marker (Leaflet divIcon) */
+.vehicle-marker {
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background: var(--marker-bg);
+  border: 2px solid var(--marker-border);
+  color: var(--marker-text);
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 14px;
+  position: relative;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.35);
+}
+
+.vehicle-marker--boat {
+  background: var(--boat-bg);
+  border-color: rgba(255,255,255,0.85);
+  color: var(--boat-text);
+}
+
+.delay-badge {
+  position: absolute;
+  right: -6px;
+  top: -6px;
+  min-width: 22px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 900;
+  border: 2px solid rgba(0,0,0,0.35);
+  background: #222;
+  color: #fff;
+}
+
+.delay-badge--ok { background: var(--good); color: #08130c; border-color: rgba(0,0,0,0.25); }
+.delay-badge--warn { background: var(--warn); color: #1a1406; border-color: rgba(0,0,0,0.25); }
+.delay-badge--bad { background: var(--bad); color: #1a0505; border-color: rgba(0,0,0,0.25); }
