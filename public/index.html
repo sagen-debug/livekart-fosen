@@ -12,12 +12,12 @@
   <body>
     <header class="topbar" id="topbar">
       <div class="topbar__inner">
-        <div>
+        <div class="titleblock">
           <h1>Livekart – kollektivtrafikken på Fosen</h1>
-          <p class="muted">Busser og hurtigbåter (AtB via Entur). Oppdateres hvert 10. sekund.</p>
+          <p class="muted">Busser og hurtigbåter/ferger (AtB via Entur). Oppdateres hvert 10. sekund.</p>
         </div>
 
-        <div class="status" id="status">
+        <div class="status" id="status" aria-live="polite">
           <div class="status__row">
             <span class="dot" id="dot"></span>
             <span id="statusText">Starter…</span>
@@ -31,6 +31,25 @@
 
     <main class="main">
       <div id="map" class="map" aria-label="Kart"></div>
+
+      <!-- Toggle: Buss / Båt -->
+      <div class="layer-controls" id="layerControls">
+        <div class="layer-controls__title">Vis på kartet</div>
+
+        <label class="layer-controls__item">
+          <input type="checkbox" id="toggleBus" checked />
+          <span>Buss</span>
+        </label>
+
+        <label class="layer-controls__item">
+          <input type="checkbox" id="toggleBoat" checked />
+          <span>Båt/ferge</span>
+        </label>
+
+        <div class="layer-controls__hint muted small">
+          Tips: legg til <code>&controls=0</code> for å skjule denne boksen.
+        </div>
+      </div>
 
       <div class="infobox" id="infobox">
         <div>
