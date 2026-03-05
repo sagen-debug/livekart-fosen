@@ -224,7 +224,7 @@
     const parts = [
       `Cache-age: ${ageStr}${warmStr}${staleStr}`,
       `Buss: ${visibleBus}`,
-      `Båt/ferge: ${visibleBoat}`,
+     `Hurtigbåt/Ferge: ${visibleBoat}`
       `Skjult (gammel pos.): ${hiddenOld}`
     ];
     if (filteredOut) parts.push(`Skjult (filter): ${filteredOut}`);
