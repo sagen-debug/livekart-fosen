@@ -6,15 +6,18 @@ const wellknown = require("wellknown");
 
 const app = express();
 app.disable("x-powered-by");
-app.set("trust proxy", 1); // Render proxy/IP
+app.set("trust proxy", 1);
 
 // =====================
 // Konfig (env)
 // =====================
 const PORT = Number(process.env.PORT) || 3000;
 
-const ET_CLIENT_NAME = (process.env.ET_CLIENT_NAME || "").trim(); // Render env var
+const ET_CLIENT_NAME = (process.env.ET_CLIENT_NAME || "").trim();
 const ENTUR_CODESPACE_ID = (process.env.ENTUR_CODESPACE_ID || "ATB").trim();
+
+// Entur vehicles() støtter maxDataAge: filtrer bort gamle updates tidlig (f.eks. PT30M)
+const ENTUR_MAX_DATA_AGE = (process.env.ENTUR_MAX_DATA_AGE || "PT30M").trim();
 
 const POLL_INTERVAL_MS = clampInt(process.env.POLL_INTERVAL_MS, 10_000, 3_000, 120_000);
 const WARM_THRESHOLD_MS =
@@ -23,18 +26,28 @@ const WARM_THRESHOLD_MS =
 
 const ENSURE_FRESH_TIMEOUT_MS = clampInt(process.env.ENSURE_FRESH_TIMEOUT_MS, 8_000, 2_000, 20_000);
 
-// Rate limit /api/vehicles: 30 requests/min per IP
+// Rate limit /api/vehicles
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 30;
 
-// Whitelist: inkluder utvalgte ruter selv utenfor polygon (f.eks hurtigbåt 800/805/810)
+// Whitelist: inkluder utvalgte ruter selv utenfor polygon
 const INCLUDE_LINE_PUBLIC_CODES = (process.env.INCLUDE_LINE_PUBLIC_CODES || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 const includeLineSet = new Set(INCLUDE_LINE_PUBLIC_CODES.map(String));
 
-// Fallback bbox (sikkerhetsnett) for Fosen-ish (lon/lat)
+// Ghost-fix: hvilke ruter vi skal klynge-dedupe (default: 870)
+const GHOST_DEDUPE_PUBLIC_CODES = (process.env.GHOST_DEDUPE_PUBLIC_CODES || "870")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const ghostDedupeSet = new Set(GHOST_DEDUPE_PUBLIC_CODES.map(String));
+
+// Hvor grovt vi klynger posisjon (3 ≈ ~100m, 2 ≈ ~1km)
+const GHOST_CLUSTER_DECIMALS = clampInt(process.env.GHOST_CLUSTER_DECIMALS, 3, 1, 6);
+
+// Fallback bbox (sikkerhetsnett)
 const FALLBACK_BBOX = {
   minLon: 9.2,
   minLat: 63.4,
@@ -42,15 +55,20 @@ const FALLBACK_BBOX = {
   maxLat: 64.6
 };
 
-// Entur vehicles-v2 GraphQL endpoint (doc)
 const ENTUR_URL = "https://api.entur.io/realtime/v2/vehicles/graphql";
 
-// Kun feltene vi skal sende til frontend
+// Henter litt ekstra felt for dedupe (strippes før vi sender til frontend)
 const ENTUR_QUERY = `
-  query ($codespaceId: String) {
-    vehicles(codespaceId: $codespaceId) {
-      lastUpdated
+  query ($codespaceId: String, $maxDataAge: Duration) {
+    vehicles(codespaceId: $codespaceId, maxDataAge: $maxDataAge) {
+      vehicleId
+      vehicleRef
+      mode
+      originRef
+      originName
+      destinationRef
       destinationName
+      lastUpdated
       delay
       location { latitude longitude }
       line { publicCode }
@@ -60,8 +78,6 @@ const ENTUR_QUERY = `
 
 // =====================
 // WKT (AREA_WKT) -> GeoJSON + PIP filter
-// Støtter POLYGON og MULTIPOLYGON.
-// Koordinater: lon lat (WKT-standard).
 // =====================
 function parseAreaFilterFromEnv() {
   const raw = (process.env.AREA_WKT || "").trim();
@@ -80,11 +96,9 @@ function parseAreaFilterFromEnv() {
   }
 
   try {
-    const geom = wellknown.parse(raw); // GeoJSON geometry
+    const geom = wellknown.parse(raw);
     if (!geom || !geom.type || !geom.coordinates) throw new Error("WKT parse ga tom geometri");
-    if (geom.type !== "Polygon" && geom.type !== "MultiPolygon") {
-      throw new Error(`Ustøttet geometri-type: ${geom.type}`);
-    }
+    if (geom.type !== "Polygon" && geom.type !== "MultiPolygon") throw new Error(`Ustøttet type: ${geom.type}`);
 
     validateGeometry(geom);
 
@@ -120,12 +134,10 @@ function geometryMeta(geom) {
   let coordinateCount = 0;
 
   if (geom.type === "Polygon") {
-    const rings = geom.coordinates;
-    ringCount = rings.length;
-    coordinateCount = rings.reduce((sum, r) => sum + (Array.isArray(r) ? r.length : 0), 0);
+    ringCount = geom.coordinates.length;
+    coordinateCount = geom.coordinates.reduce((sum, r) => sum + (Array.isArray(r) ? r.length : 0), 0);
   } else {
-    const polys = geom.coordinates;
-    for (const poly of polys) {
+    for (const poly of geom.coordinates) {
       ringCount += poly.length;
       coordinateCount += poly.reduce((sum, r) => sum + (Array.isArray(r) ? r.length : 0), 0);
     }
@@ -134,25 +146,21 @@ function geometryMeta(geom) {
 }
 
 function validateGeometry(geom) {
-  const ringsToCheck = [];
+  const rings = [];
+  if (geom.type === "Polygon") rings.push(...geom.coordinates);
+  else for (const poly of geom.coordinates) rings.push(...poly);
 
-  if (geom.type === "Polygon") {
-    ringsToCheck.push(...geom.coordinates);
-  } else if (geom.type === "MultiPolygon") {
-    for (const poly of geom.coordinates) ringsToCheck.push(...poly);
-  }
-
-  for (const ring of ringsToCheck) {
+  for (const ring of rings) {
     if (!Array.isArray(ring) || ring.length < 4) throw new Error("Ring må ha minst 4 punkter (inkl. lukking).");
     const first = ring[0];
     const last = ring[ring.length - 1];
-    if (!sameCoord(first, last)) throw new Error("Polygon må være lukket: første og siste punkt må være identiske.");
+    if (!sameCoord(first, last)) throw new Error("Polygon må være lukket (første= siste).");
 
     for (const p of ring) {
       if (!Array.isArray(p) || p.length < 2) throw new Error("Koordinat må være [lon, lat].");
       const lon = Number(p[0]);
       const lat = Number(p[1]);
-      if (!Number.isFinite(lon) || !Number.isFinite(lat)) throw new Error("Koordinat inneholder ikke-numeriske verdier.");
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) throw new Error("Koordinat har ikke-numeriske verdier.");
     }
   }
 }
@@ -161,31 +169,24 @@ function sameCoord(a, b) {
   return Array.isArray(a) && Array.isArray(b) && a.length >= 2 && b.length >= 2 && a[0] === b[0] && a[1] === b[1];
 }
 
-// Ray casting i én ring (lon/lat)
 function pointInRing(lon, lat, ring) {
   let inside = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
     const xi = ring[i][0], yi = ring[i][1];
     const xj = ring[j][0], yj = ring[j][1];
-
-    const intersect =
-      (yi > lat) !== (yj > lat) &&
-      lon < ((xj - xi) * (lat - yi)) / (yj - yi + 0.0) + xi;
-
+    const intersect = (yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (yj - yi + 0.0) + xi;
     if (intersect) inside = !inside;
   }
   return inside;
 }
 
 function pointInPolygonGeom(lon, lat, polygonGeom) {
-  // GeoJSON Polygon: [outerRing, hole1, hole2...]
   const rings = polygonGeom.coordinates;
   if (!rings || rings.length === 0) return false;
 
   const outer = rings[0];
   if (!pointInRing(lon, lat, outer)) return false;
 
-  // Holes: inne i hull => false
   for (let i = 1; i < rings.length; i++) {
     if (pointInRing(lon, lat, rings[i])) return false;
   }
@@ -205,7 +206,6 @@ function pointInArea(lon, lat, area) {
     }
   }
 
-  // fallback bbox
   return (
     lon >= FALLBACK_BBOX.minLon &&
     lon <= FALLBACK_BBOX.maxLon &&
@@ -219,12 +219,13 @@ let areaFilter = parseAreaFilterFromEnv();
 // =====================
 // Cache + polling + ensureFreshCache
 // =====================
-let cache = null; // filtrerte vehicles
-let fetchedAtMs = 0; // tidspunkt for siste vellykkede fetch
+let cache = null;
+let fetchedAtMs = 0;
 let lastError = null;
 
-let fetchInFlight = null; // Promise-lås
+let fetchInFlight = null;
 let lastFetchStartedAtMs = 0;
+let lastFetchStats = null;
 
 function cacheAgeMs() {
   if (!fetchedAtMs) return Infinity;
@@ -246,6 +247,12 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
+function lastUpdatedMs(iso) {
+  if (!iso) return 0;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : 0;
+}
+
 function normalizeVehicle(v) {
   const loc = v && v.location;
   const line = v && v.line;
@@ -255,6 +262,15 @@ function normalizeVehicle(v) {
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
 
   return {
+    // intern dedupe-støtte
+    vehicleId: v.vehicleId || null,
+    vehicleRef: v.vehicleRef || null,
+    mode: v.mode || null,
+    originRef: v.originRef || null,
+    originName: v.originName || null,
+    destinationRef: v.destinationRef || null,
+
+    // det vi sender til frontend
     lastUpdated: v.lastUpdated || null,
     destinationName: v.destinationName || null,
     delay: typeof v.delay === "number" && Number.isFinite(v.delay) ? v.delay : 0,
@@ -263,12 +279,100 @@ function normalizeVehicle(v) {
   };
 }
 
+function canonicalIdKey(v) {
+  if (v.vehicleId) return `id:${String(v.vehicleId)}`;
+  if (v.vehicleRef) return `ref:${String(v.vehicleRef)}`;
+  return null;
+}
+
+function isFerryish(v) {
+  const mode = String(v.mode || "");
+  const code = String(v?.line?.publicCode || "");
+  return mode === "FERRY" || /^8\d\d$/.test(code);
+}
+
+function ferryKey(v) {
+  const code = String(v?.line?.publicCode || "");
+  const o = String(v.originRef || v.originName || "");
+  const d = String(v.destinationRef || v.destinationName || "");
+  return `${code}|${o}|${d}`;
+}
+
+function upsertNewest(map, key, v) {
+  const prev = map.get(key);
+  if (!prev || lastUpdatedMs(v.lastUpdated) >= lastUpdatedMs(prev.lastUpdated)) map.set(key, v);
+}
+
+function dedupeVehicles(list) {
+  // Pass 1: dedupe på vehicleId/vehicleRef hvis mulig
+  const byId = new Map();
+  const noId = [];
+
+  for (const v of list) {
+    const k = canonicalIdKey(v);
+    if (!k) noId.push(v);
+    else upsertNewest(byId, k, v);
+  }
+
+  const stage1 = noId.concat(Array.from(byId.values()));
+
+  // Pass 2: for ferge/hurtigbåt: dedupe på rute + origin/destination
+  const ferryMap = new Map();
+  const others = [];
+
+  for (const v of stage1) {
+    if (!isFerryish(v)) {
+      others.push(v);
+      continue;
+    }
+    upsertNewest(ferryMap, ferryKey(v), v);
+  }
+
+  return others.concat(Array.from(ferryMap.values()));
+}
+
+// --- Ghost ferry suppression (spatial cluster) ---
+function roundCoord(n, decimals) {
+  const p = 10 ** decimals;
+  return Math.round(n * p) / p;
+}
+
+function suppressGhostFerriesByCluster(list) {
+  const keepByCluster = new Map(); // clusterKey -> vehicle
+  const passthrough = [];
+
+  for (const v of list) {
+    const code = String(v?.line?.publicCode || "");
+
+    if (!isFerryish(v) || !ghostDedupeSet.has(code)) {
+      passthrough.push(v);
+      continue;
+    }
+
+    const lat = Number(v?.location?.latitude);
+    const lon = Number(v?.location?.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      passthrough.push(v);
+      continue;
+    }
+
+    const key = `${code}|${roundCoord(lat, GHOST_CLUSTER_DECIMALS)}|${roundCoord(lon, GHOST_CLUSTER_DECIMALS)}`;
+    const prev = keepByCluster.get(key);
+
+    if (!prev || lastUpdatedMs(v.lastUpdated) >= lastUpdatedMs(prev.lastUpdated)) {
+      keepByCluster.set(key, v);
+    }
+  }
+
+  return passthrough.concat(Array.from(keepByCluster.values()));
+}
+
 async function fetchEnturOnce(reason) {
   if (!ET_CLIENT_NAME) throw new Error("ET_CLIENT_NAME mangler (må settes i env).");
 
   const body = JSON.stringify({
     query: ENTUR_QUERY,
-    variables: { codespaceId: ENTUR_CODESPACE_ID }
+    variables: { codespaceId: ENTUR_CODESPACE_ID, maxDataAge: ENTUR_MAX_DATA_AGE }
   });
 
   const res = await fetchWithTimeout(
@@ -291,42 +395,61 @@ async function fetchEnturOnce(reason) {
 
   const json = await res.json().catch(() => null);
   if (!json) throw new Error("Entur: kunne ikke parse JSON");
-
-  if (json.errors && json.errors.length) {
-    throw new Error(`Entur GraphQL errors: ${json.errors[0].message || "ukjent"}`);
-  }
+  if (json.errors && json.errors.length) throw new Error(`Entur GraphQL errors: ${json.errors[0].message || "ukjent"}`);
 
   const vehicles = json?.data?.vehicles;
   if (!Array.isArray(vehicles)) throw new Error("Entur: data.vehicles er ikke en liste");
 
-  // Filtrer til område før caching, MEN inkluder whitelisted ruter uansett polygon
-  const filtered = vehicles
-    .map(normalizeVehicle)
-    .filter(Boolean)
-    .filter((v) => {
-      const inArea = pointInArea(v.location.longitude, v.location.latitude, areaFilter);
-      const code = v?.line?.publicCode;
-      const whitelisted = code != null && includeLineSet.has(String(code));
-      return inArea || whitelisted;
-    });
+  const normalized = vehicles.map(normalizeVehicle).filter(Boolean);
 
-  return { filtered, rawCount: vehicles.length, filteredCount: filtered.length, reason };
+  const filtered = normalized.filter((v) => {
+    const inArea = pointInArea(v.location.longitude, v.location.latitude, areaFilter);
+    const code = v?.line?.publicCode;
+    const whitelisted = code != null && includeLineSet.has(String(code));
+    return inArea || whitelisted;
+  });
+
+  const deduped = dedupeVehicles(filtered);
+
+  const ghostBefore = deduped.filter((v) => ghostDedupeSet.has(String(v?.line?.publicCode || ""))).length;
+  const ghostSuppressed = suppressGhostFerriesByCluster(deduped);
+  const ghostAfter = ghostSuppressed.filter((v) => ghostDedupeSet.has(String(v?.line?.publicCode || ""))).length;
+
+  // Strip intern-felt før caching/return
+  const output = ghostSuppressed.map(({ vehicleId, vehicleRef, mode, originRef, originName, destinationRef, ...rest }) => rest);
+
+  return {
+    output,
+    stats: {
+      rawCount: vehicles.length,
+      normalizedCount: normalized.length,
+      filteredCount: filtered.length,
+      dedupedCount: deduped.length,
+      outputCount: output.length,
+      ghostRouteCountBefore: ghostBefore,
+      ghostRouteCountAfter: ghostAfter,
+      ghostRoutes: GHOST_DEDUPE_PUBLIC_CODES,
+      ghostClusterDecimals: GHOST_CLUSTER_DECIMALS,
+      enturMaxDataAge: ENTUR_MAX_DATA_AGE,
+      reason
+    }
+  };
 }
 
 async function updateCache(reason) {
-  if (fetchInFlight) return fetchInFlight; // concurrency-lås
+  if (fetchInFlight) return fetchInFlight;
 
   lastFetchStartedAtMs = Date.now();
   fetchInFlight = (async () => {
     try {
-      const { filtered } = await fetchEnturOnce(reason);
-      cache = filtered;
+      const { output, stats } = await fetchEnturOnce(reason);
+      cache = output;
       fetchedAtMs = Date.now();
       lastError = null;
+      lastFetchStats = { ...stats, updatedAt: new Date().toISOString() };
       return true;
     } catch (err) {
       lastError = String(err && err.message ? err.message : err);
-      // behold gammel cache
       return false;
     } finally {
       fetchInFlight = null;
@@ -357,7 +480,6 @@ function promiseCompletedWithin(promise, timeoutMs) {
   });
 }
 
-// WAKE / første request-boost (Render Free)
 async function ensureFreshCache() {
   const needs = !cache || cacheAgeMs() >= WARM_THRESHOLD_MS;
   if (!needs) return { triggered: false, warming: Boolean(fetchInFlight) };
@@ -365,24 +487,23 @@ async function ensureFreshCache() {
   const p = updateCache("ensureFreshCache");
   const finished = await promiseCompletedWithin(p, ENSURE_FRESH_TIMEOUT_MS);
 
-  // Hvis ikke ferdig innen timeout => warming=true (men vi svarer uansett)
   return { triggered: true, warming: !finished || Boolean(fetchInFlight) };
 }
 
-// Start polling loop
+// Polling
 setInterval(() => {
   updateCache("poll").catch(() => {});
 }, POLL_INTERVAL_MS);
 
-// Start gjerne én fetch ved oppstart (best effort)
+// Best effort ved oppstart
 setTimeout(() => {
   updateCache("startup").catch(() => {});
 }, 0);
 
 // =====================
-// Rate limit (fixed window)
+// Rate limit
 // =====================
-const rateMap = new Map(); // ip -> { windowStartMs, count }
+const rateMap = new Map();
 
 function rateLimitInfo(ip) {
   const now = Date.now();
@@ -420,6 +541,7 @@ app.get("/api/health", (req, res) => {
     env: {
       port: PORT,
       enturCodespaceId: ENTUR_CODESPACE_ID,
+      enturMaxDataAge: ENTUR_MAX_DATA_AGE,
       etClientNameSet: Boolean(ET_CLIENT_NAME)
     },
     polling: {
@@ -434,7 +556,8 @@ app.get("/api/health", (req, res) => {
       stale: isStale(),
       lastError,
       inFlight: Boolean(fetchInFlight),
-      lastFetchStartedAt: lastFetchStartedAtMs ? new Date(lastFetchStartedAtMs).toISOString() : null
+      lastFetchStartedAt: lastFetchStartedAtMs ? new Date(lastFetchStartedAtMs).toISOString() : null,
+      lastFetchStats
     },
     area: {
       polygonUsed: areaFilter.polygonUsed,
@@ -447,11 +570,14 @@ app.get("/api/health", (req, res) => {
       wktReason: areaFilter.wktReason,
       includeLinePublicCodes: INCLUDE_LINE_PUBLIC_CODES,
       fallbackBbox: FALLBACK_BBOX
+    },
+    ghostFerry: {
+      enabledForPublicCodes: GHOST_DEDUPE_PUBLIC_CODES,
+      clusterDecimals: GHOST_CLUSTER_DECIMALS
     }
   });
 });
 
-// Test-endepunkt: trigger Entur fetch nå
 app.get("/api/entur-test", async (req, res) => {
   const started = Date.now();
   const ok = await updateCache("entur-test");
@@ -462,20 +588,18 @@ app.get("/api/entur-test", async (req, res) => {
     ageMs: cacheAgeMs(),
     stale: isStale(),
     lastError,
-    count: Array.isArray(cache) ? cache.length : 0
+    count: Array.isArray(cache) ? cache.length : 0,
+    lastFetchStats
   });
 });
 
 app.get("/api/vehicles", async (req, res) => {
-  // Cache-Control krav
   res.set("Cache-Control", "public, max-age=3");
 
-  // Rate limit (men vi svarer med cache uansett)
   const ip = req.ip || "unknown";
   const rl = rateLimitInfo(ip);
   if (rl.limited) res.set("Retry-After", String(Math.ceil(rl.meta.resetMs / 1000)));
 
-  // Best effort warm-cache før svar
   const warm = await ensureFreshCache();
 
   res.json({
@@ -495,7 +619,7 @@ app.get("/api/vehicles", async (req, res) => {
 });
 
 // =====================
-// Statisk frontend fra /public
+// Statisk frontend
 // =====================
 app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] }));
 
